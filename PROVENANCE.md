@@ -23,6 +23,7 @@
 | `rua.gif`、`bubble-petpet.gif` | 内置动图素材。 |
 | `bubble-money1.gif` | 内置泡泡图（余额预警默认内容的配图）。 |
 | `Ya1.mp3` / `Ya2.mp3`、`D1.mp3` / `D2.mp3` | 内置音效（按压 / 松开）。 |
+| `ice-single.wav` / `ice-triple.wav` | 网络流传的「冰冰冰」音效，原作者未确认。基于 [dsh-completion-alert 记录的片段](https://github.com/yimengqingfeng3-debug/dsh-completion-alert/blob/master/NOTICE) 裁切、均衡、降响度和淡出。可用 `node tools/prepare-ice-sounds.mjs <原始片段> <输出目录>` 生成。 |
 | `minecraft-exp-orb.wav`、`task-end-a.wav` | 内置任务结束音（Minecraft·经验球 / 预设 A）。 |
 
 ## 三、元数据清理
