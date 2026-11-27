@@ -19086,14 +19086,13 @@ function render() {
   // 注意:不在泡泡显示期间整泡重绘(内容在用户观看时保持稳定);
   // 数值/峰谷等更新由“泡泡消失→下一次显示”时的渲染自然采用最新 state
 }
-function express() {
+function express(allowBubbleOutside) {
   root.style.right = 'auto'
   root.style.bottom = 'auto'
   root.style.left = state.left + 'px'
   // v785：最后一道保险 —— 所有"写 state.top"的路径最终都会走到这里，统一把顶边夹出"窗口控件带"
-  // （拖动/吸附/settle 各自也夹了一次；这里兜住启动、自愈、外部直接改 state 等路径）。
-  // 见 clampWidgetTop：下限 = 叠层下沿（普通浏览器为 0 ⇒ 与以前完全一致）。
-  state.top = clampWidgetTop(state.top)
+  // 甩动时图片已受自己的边界约束，气泡所在的盒子可以暂时越过叠层下沿。
+  if (!allowBubbleOutside) state.top = clampWidgetTop(state.top)
   root.style.top = state.top + 'px'
   root.classList.toggle('dshwv-left', !!state.flip)
 }
@@ -21537,17 +21536,21 @@ audioEditReleaseBtn.addEventListener('click', function (e) { e.stopPropagation()
 var hitCanvas = null
 var hitReady = false
 var hitFailed = false // 命中图加载失败（如图片 404/资源缺失）：退回矩形区域判定，绝不吞掉整页事件
+var hitArtBounds = null // 图片中非透明像素的外接矩形，坐标归一化到 [0, 1]
 function setupHitTest(url) {
   try {
-    hitCanvas = document.createElement('canvas')
+    var canvas = document.createElement('canvas')
+    hitCanvas = canvas
     hitCanvas.width = 610
     hitCanvas.height = 610
     hitReady = false
     hitFailed = false
+    hitArtBounds = null
     var probe = new Image()
     probe.onload = function () {
+      if (hitCanvas !== canvas) return
       try {
-        var ctx = hitCanvas.getContext('2d')
+        var ctx = canvas.getContext('2d')
         // 按 object-fit:contain + object-position:right bottom 的实际几何绘制，
         // 使非正方形（如 GIF 动图）的命中区域与显示一致
         var iw = probe.width || 610
@@ -21581,6 +21584,7 @@ function setupHitTest(url) {
       }
     }
     probe.onerror = function () {
+      if (hitCanvas !== canvas) return
       // 图片加载失败：不能把整页当成鲸鱼命中区吞掉事件（会全页面点不动），
       // 标记失败，命中判定退回图像矩形区域。
       hitFailed = true
@@ -21632,14 +21636,20 @@ function buildHitClipPath() {
     if (!c) return ''
     var data = c.getImageData(0, 0, 610, 610).data // 只读一次（1.5MB），别逐行读
     var pts = []
+    var left = 610, right = 0
     for (var y = 0; y < 610; y++) {
       var l = -1, r = -1
       var base = y * 610 * 4
       for (var x = 0; x < 610; x++) {
         if (data[base + x * 4 + 3] > 10) { if (l < 0) l = x; r = x }
       }
-      if (l >= 0) { pts.push([l, y]); pts.push([r, y]) }
+      if (l >= 0) {
+        pts.push([l, y]); pts.push([r, y])
+        left = Math.min(left, l)
+        right = Math.max(right, r + 1)
+      }
     }
+    if (pts.length) hitArtBounds = { left: left / 610, top: pts[0][1] / 610, right: right / 610, bottom: (pts[pts.length - 1][1] + 1) / 610 }
     if (pts.length < 8) return ''
     var hull = convexHull(pts)
     if (!hull || hull.length < 3) return ''
@@ -21712,16 +21722,22 @@ function onDocPointerDown(e) {
   if (e.button !== 0 && e.pointerType === 'mouse') return
   if (!isWhaleHit(e)) return
   try { e.preventDefault(); e.stopPropagation() } catch (err) {}
-  if (stopFling()) {
+  var caught = stopFling()
+  if (caught) {
     // 重新抓住时就在当前位置停下，让后续点按或取消都不会跳回起飞前的锚点。
     state.h = state.v = null
     saveAnchorPos()
   }
   var vp = viewport()
   var rect = root.getBoundingClientRect()
+  var minTop = widgetTopMin()
   drag = {
     active: true, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
-    origLeft: rect.left, origTop: rect.top, w: rect.width, h: rect.height, moved: false, vp: vp,
+    origLeft: rect.left, origTop: rect.top, w: rect.width, h: rect.height, moved: false, vp: vp, caught: caught,
+    minLeft: caught ? Math.min(0, rect.left) : 0,
+    maxLeft: Math.max(0, vp.w - rect.width, caught ? rect.left : 0),
+    minTop: caught ? Math.min(minTop, rect.top) : minTop,
+    maxTop: Math.max(minTop, vp.h - rect.height, caught ? rect.top : minTop),
     samples: [{ x: e.clientX, y: e.clientY, time: e.timeStamp }]
   }
   root.classList.add('dshwv-dragging')
@@ -21746,10 +21762,9 @@ function onDocPointerMove(e) {
   // Keep the pre-drag flip orientation while dragging (state.h/v stay as they
   // were); on release endDrag() recomputes the anchors and settle() flips the
   // class with a smooth transition instead of reverting instantly.
-  state.left = clamp(drag.origLeft + dx, 0, Math.max(0, drag.vp.w - drag.w))
-  // v785：拖拽时就把"桌面端窗口控件带"排除在可移动范围外（顶边下限 = 叠层下沿）
-  state.top = clampWidgetTop(drag.origTop + dy, Math.max(0, drag.vp.h - drag.h))
-  express()
+  state.left = clamp(drag.origLeft + dx, drag.minLeft, drag.maxLeft)
+  state.top = clamp(drag.origTop + dy, drag.minTop, drag.maxTop)
+  express(drag.caught)
 }
 function onDocPointerUp(e) {
   if (!drag || !drag.active || e.pointerId !== drag.pointerId) return
@@ -21989,17 +22004,36 @@ function flingVelocity(e, samples) {
   }
   return null
 }
+function flingBounds(w, h, vp) {
+  // 用未被按压拉伸的图片布局尺寸。已有命中图时，进一步去掉透明边距。
+  var iw = img.offsetWidth
+  var ih = img.offsetHeight
+  var art = hitArtBounds
+  if (!art) {
+    // 画布不可读时，按 object-fit:contain 估算图片实际占用的矩形。
+    var nw = img.naturalWidth || iw || 1
+    var nh = img.naturalHeight || ih || 1
+    var scale = Math.min(iw / nw, ih / nh)
+    art = { left: 1 - nw * scale / (iw || 1), top: 1 - nh * scale / (ih || 1), right: 1, bottom: 1 }
+  }
+  var left = w - iw + art.left * iw
+  var right = w - iw + art.right * iw
+  var top = h - ih + art.top * ih
+  var bottom = h - ih + art.bottom * ih
+  var minLeft = state.flip ? right - w : -left
+  var maxLeft = vp.w - rightGap() - (state.flip ? w - left : right)
+  var minTop = widgetTopMin() - top
+  return { minLeft: minLeft, maxLeft: Math.max(minLeft, maxLeft), minTop: minTop, maxTop: Math.max(minTop, vp.h - bottom) }
+}
 function startFling(left, top, w, h, vp, velocity) {
-  var maxLeft = Math.max(0, vp.w - w - rightGap())
-  var minTop = widgetTopMin()
-  var maxTop = Math.max(minTop, vp.h - h)
-  var vx = maxLeft > 0 ? velocity.x : 0
-  var vy = maxTop > minTop ? velocity.y : 0
+  var bounds = flingBounds(w, h, vp)
+  var vx = bounds.maxLeft > bounds.minLeft ? velocity.x : 0
+  var vy = bounds.maxTop > bounds.minTop ? velocity.y : 0
   var lastFrame = null
   root.classList.add('dshwv-flinging')
-  state.left = clamp(left, 0, maxLeft)
-  state.top = clamp(top, minTop, maxTop)
-  express()
+  state.left = clamp(left, bounds.minLeft, bounds.maxLeft)
+  state.top = clamp(top, bounds.minTop, bounds.maxTop)
+  express(true)
   function advance(ts) {
     var dt = lastFrame === null ? 0 : Math.min(0.032, (ts - lastFrame) / 1000)
     lastFrame = ts
@@ -22007,13 +22041,13 @@ function startFling(left, top, w, h, vp, velocity) {
     var nextTop = state.top + vy * dt
     var damping = Math.exp(-1.7 * dt)
     // 碰到哪一侧就只反转垂直于该侧的速度。角落同时反转两个分量。
-    if ((nextLeft <= 0 && vx < 0) || (nextLeft >= maxLeft && vx > 0)) vx *= -0.74
-    if ((nextTop <= minTop && vy < 0) || (nextTop >= maxTop && vy > 0)) vy *= -0.74
+    if ((nextLeft <= bounds.minLeft && vx < 0) || (nextLeft >= bounds.maxLeft && vx > 0)) vx *= -0.74
+    if ((nextTop <= bounds.minTop && vy < 0) || (nextTop >= bounds.maxTop && vy > 0)) vy *= -0.74
     vx *= damping
     vy *= damping
-    state.left = clamp(nextLeft, 0, maxLeft)
-    state.top = clamp(nextTop, minTop, maxTop)
-    express()
+    state.left = clamp(nextLeft, bounds.minLeft, bounds.maxLeft)
+    state.top = clamp(nextTop, bounds.minTop, bounds.maxTop)
+    express(true)
     if (Math.hypot(vx, vy) < 36) finishFling()
     else flingFrame = requestAnimationFrame(advance)
   }
@@ -22031,9 +22065,7 @@ function finishFling() {
   var vp = viewport()
   var w = root.offsetWidth
   var h = root.offsetHeight
-  var left = clamp(state.left, 0, Math.max(0, vp.w - w - rightGap()))
-  var top = clampWidgetTop(state.top, Math.max(0, vp.h - h))
-  placeDraggedWidget(left, top, w, h, vp)
+  placeDraggedWidget(state.left, state.top, w, h, vp)
 }
 document.addEventListener('visibilitychange', function () { if (document.hidden) finishFling() })
 window.addEventListener('pagehide', finishFling)
@@ -22062,6 +22094,7 @@ function endDrag(e, clickAllowed, cancelled) {
   }
   setWidgetCursor(isWhaleHit(e) ? 'grab' : '')
   if (clickAllowed && !drag.moved) {
+    if (drag.caught) settle()
     // 长按刚唤出菜单:这次抬手不再当作点击(避免顺带弹出余额泡)
     if (longPressRecent()) return
     whaleClick()
@@ -22070,9 +22103,8 @@ function endDrag(e, clickAllowed, cancelled) {
   }
   var dx = e.clientX - drag.startX
   var dy = e.clientY - drag.startY
-  var left = clamp(drag.origLeft + dx, 0, Math.max(0, drag.vp.w - drag.w))
-  // v785：落位计算也要先排除"窗口控件带"（否则吸附判定点会用到带内的 top）
-  var top = clampWidgetTop(drag.origTop + dy, Math.max(0, drag.vp.h - drag.h))
+  var left = clamp(drag.origLeft + dx, drag.minLeft, drag.maxLeft)
+  var top = clamp(drag.origTop + dy, drag.minTop, drag.maxTop)
   var velocity = clickAllowed && drag.moved && e.type === 'pointerup' ? flingVelocity(e, drag.samples) : null
   if (velocity) startFling(left, top, drag.w, drag.h, drag.vp, velocity)
   else placeDraggedWidget(left, top, drag.w, drag.h, drag.vp)
