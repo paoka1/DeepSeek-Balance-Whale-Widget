@@ -77,6 +77,16 @@ DeepSeek Harness（DSH）Web 界面右下角的常驻挂件：小鲸鱼气泡图
 - 🐳 **自定义角色**：上传自己的鲸鱼图片（图库管理，可回退默认）
 - 🖼️ **泡泡图库**：内置 `petpet`、`money1` 两张图，也可上传 png/gif，供图片/随机图片模块使用
 
+#### 导入「🧊」和「🧊🧊🧊」
+
+在仓库目录运行下面的命令。需要 Node.js、FFmpeg 和一份约 1.06 秒的原版三连音。[音源说明](https://github.com/yimengqingfeng3-debug/dsh-completion-alert/blob/master/NOTICE)
+
+~~~sh
+node tools/prepare-ice-sounds.mjs "/path/to/bingbingbing.ogg" "../whale-ice-sounds"
+~~~
+
+在「资源管理 → 音频 → 导入片段」导入生成的 WAV，再到「音效与提示 → 全局设置 → 按压音效」新建两个音效组。分别把单声和三连声设为「🧊」和「🧊🧊🧊」的松开音效，按下音效留空。默认仍是小黄鸭。
+
 ### 自定义 API（多厂商余额 / 额度）
 
 除内置的 DeepSeek 余额外，可在「小鲸鱼记账 → 模型」里添加任意厂商；每个模型独立配置余额预警 / 今日预算 / 额度：
