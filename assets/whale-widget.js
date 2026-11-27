@@ -567,6 +567,7 @@ var css = [
   'html [class*="dshwv-"],html [class*="dshwv-"] *{-webkit-tap-highlight-color:transparent;-webkit-touch-callout:none}',
   '.dshwv-root.dshwv-left{transform:scaleX(-1)}',
   '.dshwv-root.dshwv-dragging{cursor:grabbing;transition:none}',
+  '.dshwv-root.dshwv-flinging{transition:none}',
   '.dshwv-body{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:50% 100%;transition:transform .22s cubic-bezier(.34,1.56,.64,1)}',
   // v757（issue #147）：`.dshwv-img` 由 `pointer-events:none` 改为 `auto` —— 鲸鱼身体**自己接指针事件**。
   // 原来靠"主文档监听 + isWhaleHit()"判定命中，而指针落在 `<iframe>`（如右侧栏 HTML 预览）上时
@@ -14145,6 +14146,7 @@ var busy = false
 var settleTimer = null
 var animDelayTimer = null
 var drag = null
+var flingFrame = null
 var shown = null
 var animId = null
 var bubbleShown = false
@@ -19096,6 +19098,7 @@ function express() {
   root.classList.toggle('dshwv-left', !!state.flip)
 }
 function settle() {
+  if (flingFrame !== null) { finishFling(); return }
   var vp = viewport()
   var w = root.offsetWidth || root.getBoundingClientRect().width || 0
   var h = root.offsetHeight || root.getBoundingClientRect().height || 0
@@ -19538,6 +19541,7 @@ function scaleToDisplay(s) {
   return Math.round((s - MIN_SCALE) / ((MAX_SCALE - MIN_SCALE) / 19)) + 1
 }
 function setScale(v) {
+  finishFling()
   var next = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(v))) * 10) / 10
   // 缩放测量需要 left/top 立即到位：临时禁用过渡（滚轮/数字框路径没有
   // 滑块 pointerdown 的 transition:none，否则 r2 测的是过渡起点导致错锚点）
@@ -19872,6 +19876,7 @@ function pressUp() {
 var menuOpen = false
 var menuClosedAt = 0 // 最近一次关闭菜单的时刻(用于避免"关掉后同一次手势又把它长按打开")
 function toggleMenu() {
+  finishFling()
   // v865（issue #237 后半）：打开菜单时补读一次 size 配置（别的端/别的标签改过也能立刻生效）
   try { resyncSizeCfg() } catch (err) {}
   menuOpen = !menuOpen
@@ -21677,6 +21682,7 @@ function isWhaleHit(e) {
   }
 }
 function onDocPointerDown(e) {
+  if (e.isPrimary === false || (drag && drag.active)) return
   if (e.target && e.target.closest) {
     if (e.target.closest('.dshwv-pop') || e.target.closest('.dshwv-menu-btn')) return
     // 点击在面板/弹窗内部：交给面板自身逻辑处理
@@ -21706,9 +21712,18 @@ function onDocPointerDown(e) {
   if (e.button !== 0 && e.pointerType === 'mouse') return
   if (!isWhaleHit(e)) return
   try { e.preventDefault(); e.stopPropagation() } catch (err) {}
+  if (stopFling()) {
+    // 重新抓住时就在当前位置停下，让后续点按或取消都不会跳回起飞前的锚点。
+    state.h = state.v = null
+    saveAnchorPos()
+  }
   var vp = viewport()
   var rect = root.getBoundingClientRect()
-  drag = { active: true, startX: e.clientX, startY: e.clientY, origLeft: rect.left, origTop: rect.top, w: rect.width, h: rect.height, moved: false, vp: vp }
+  drag = {
+    active: true, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY,
+    origLeft: rect.left, origTop: rect.top, w: rect.width, h: rect.height, moved: false, vp: vp,
+    samples: [{ x: e.clientX, y: e.clientY, time: e.timeStamp }]
+  }
   root.classList.add('dshwv-dragging')
   pressDown()
   setWidgetCursor('grabbing')
@@ -21716,11 +21731,18 @@ function onDocPointerDown(e) {
   document.addEventListener('pointerup', onDocPointerUp, true)
   document.addEventListener('pointercancel', onDocPointerCancel, true)
 }
+var FLING_SAMPLE_MS = 100
 function onDocPointerMove(e) {
-  if (!drag || !drag.active) return
+  if (!drag || !drag.active || e.pointerId !== drag.pointerId) return
   var dx = e.clientX - drag.startX
   var dy = e.clientY - drag.startY
   if (dx * dx + dy * dy >= CLICK_SQ) drag.moved = true
+  var samples = drag.samples
+  var last = samples[samples.length - 1]
+  if (e.clientX !== last.x || e.clientY !== last.y) {
+    samples.push({ x: e.clientX, y: e.clientY, time: e.timeStamp })
+    while (samples.length > 1 && e.timeStamp - samples[0].time > FLING_SAMPLE_MS) samples.shift()
+  }
   // Keep the pre-drag flip orientation while dragging (state.h/v stay as they
   // were); on release endDrag() recomputes the anchors and settle() flips the
   // class with a smooth transition instead of reverting instantly.
@@ -21730,11 +21752,14 @@ function onDocPointerMove(e) {
   express()
 }
 function onDocPointerUp(e) {
+  if (!drag || !drag.active || e.pointerId !== drag.pointerId) return
   // 拦截鲸鱼区域内的 pointerup：防止下方元素（如文件行）监听 pointerup 穿透误触发
   try { if (isWhaleHit(e)) { e.preventDefault(); e.stopPropagation() } } catch (err) {}
   endDrag(e, true)
 }
-function onDocPointerCancel(e) { endDrag(e, false, true) }
+function onDocPointerCancel(e) {
+  if (drag && e.pointerId === drag.pointerId) endDrag(e, false, true)
+}
 function onDocClickStopper(e) {
   // 只在鲸鱼命中区域拦截 click（保持透明区 pass-through）。
   // 持久注册（不随 endDrag 移除）——click 在 pointerup 之后派发，
@@ -21919,6 +21944,7 @@ function onWhaleWheel(e) {
 try { root.addEventListener('wheel', onWhaleWheel, { passive: false }) } catch (err) {}
 function onDocPointerMoveCursor(e) {
   if (drag && drag.active) {
+    if (e.pointerId !== drag.pointerId) return
     // v751（PR #119）：按钮已经松开却还在"拖动中" = 这一次 pointerup 丢了（例如松手时指针在窗口外）：
     // 不能继续强推 grabbing（光标会一直卡在"抓紧"），顺手补一次 endDrag 收尾，避免挂件继续黏着鼠标。
     // 鼠标/触摸/笔拖动期间 e.buttons 都是 1，buttons===0 只可能意味着真的松手了。
@@ -21944,6 +21970,73 @@ document.addEventListener('pointermove', onDocPointerMoveCursor, true)
 // 启动即应用一次菜单按钮可见性：触屏上 ☰ 常显（issue #91 缺陷2）。
 // 配置读回来之后还会再应用一次，这里是配置请求失败时的兜底。
 try { applyMenuBtnHideUI() } catch (err) {}
+
+function flingVelocity(e, samples) {
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return null
+  var last = samples[samples.length - 1]
+  // 松手前停住就按普通拖放处理。取最近一小段的平均速度，避免单个事件抖动触发甩动。
+  if (e.timeStamp - last.time > 75) return null
+  for (var i = 0; i < samples.length; i++) {
+    var sample = samples[i]
+    var elapsed = e.timeStamp - sample.time
+    if (elapsed > FLING_SAMPLE_MS || elapsed <= 0) continue
+    var vx = (e.clientX - sample.x) * 1000 / Math.max(16, elapsed)
+    var vy = (e.clientY - sample.y) * 1000 / Math.max(16, elapsed)
+    var speed = Math.hypot(vx, vy)
+    if (speed < 700) return null
+    var gain = Math.min(1.25, 4200 / speed)
+    return { x: vx * gain, y: vy * gain }
+  }
+  return null
+}
+function startFling(left, top, w, h, vp, velocity) {
+  var maxLeft = Math.max(0, vp.w - w - rightGap())
+  var minTop = widgetTopMin()
+  var maxTop = Math.max(minTop, vp.h - h)
+  var vx = maxLeft > 0 ? velocity.x : 0
+  var vy = maxTop > minTop ? velocity.y : 0
+  var lastFrame = null
+  root.classList.add('dshwv-flinging')
+  state.left = clamp(left, 0, maxLeft)
+  state.top = clamp(top, minTop, maxTop)
+  express()
+  function advance(ts) {
+    var dt = lastFrame === null ? 0 : Math.min(0.032, (ts - lastFrame) / 1000)
+    lastFrame = ts
+    var nextLeft = state.left + vx * dt
+    var nextTop = state.top + vy * dt
+    var damping = Math.exp(-1.7 * dt)
+    // 碰到哪一侧就只反转垂直于该侧的速度。角落同时反转两个分量。
+    if ((nextLeft <= 0 && vx < 0) || (nextLeft >= maxLeft && vx > 0)) vx *= -0.74
+    if ((nextTop <= minTop && vy < 0) || (nextTop >= maxTop && vy > 0)) vy *= -0.74
+    vx *= damping
+    vy *= damping
+    state.left = clamp(nextLeft, 0, maxLeft)
+    state.top = clamp(nextTop, minTop, maxTop)
+    express()
+    if (Math.hypot(vx, vy) < 36) finishFling()
+    else flingFrame = requestAnimationFrame(advance)
+  }
+  flingFrame = requestAnimationFrame(advance)
+}
+function stopFling() {
+  if (flingFrame === null) return false
+  cancelAnimationFrame(flingFrame)
+  flingFrame = null
+  root.classList.remove('dshwv-flinging')
+  return true
+}
+function finishFling() {
+  if (!stopFling()) return
+  var vp = viewport()
+  var w = root.offsetWidth
+  var h = root.offsetHeight
+  var left = clamp(state.left, 0, Math.max(0, vp.w - w - rightGap()))
+  var top = clampWidgetTop(state.top, Math.max(0, vp.h - h))
+  placeDraggedWidget(left, top, w, h, vp)
+}
+document.addEventListener('visibilitychange', function () { if (document.hidden) finishFling() })
+window.addEventListener('pagehide', finishFling)
 
 function endDrag(e, clickAllowed, cancelled) {
   if (!drag || !drag.active) return
@@ -21980,11 +22073,16 @@ function endDrag(e, clickAllowed, cancelled) {
   var left = clamp(drag.origLeft + dx, 0, Math.max(0, drag.vp.w - drag.w))
   // v785：落位计算也要先排除"窗口控件带"（否则吸附判定点会用到带内的 top）
   var top = clampWidgetTop(drag.origTop + dy, Math.max(0, drag.vp.h - drag.h))
+  var velocity = clickAllowed && drag.moved && e.type === 'pointerup' ? flingVelocity(e, drag.samples) : null
+  if (velocity) startFling(left, top, drag.w, drag.h, drag.vp, velocity)
+  else placeDraggedWidget(left, top, drag.w, drag.h, drag.vp)
+}
+function placeDraggedWidget(left, top, w, h, vp) {
   // 自定义吸附区（比例/绝对/关闭）。判定点：左右吸附/翻转 = 图像中心 x，
   // 下吸附 = 图像中心 y，上吸附 = 挂件盒中心 y。
   // 解析计算，避免拖动结束过渡期强制布局。
-  var ac = artCenterAt(left, top, drag.w, drag.h, !!state.flip)
-  var z = snapZones(ac.cx, top + drag.h / 2, ac.cy, drag.vp)
+  var ac = artCenterAt(left, top, w, h, !!state.flip)
+  var z = snapZones(ac.cx, top + h / 2, ac.cy, vp)
   if (z.zH === 'left') {
     state.h = 'left'
     state.hOff = 0
@@ -22049,6 +22147,7 @@ function applyAnchorPos() {
   } catch (err) { return false }
 }
 window.addEventListener('resize', function () {
+  if (flingFrame !== null) { finishFling(); return }
   if (state.h === null && state.v === null && applyAnchorPos()) return
   settle()
 })
